@@ -1,5 +1,4 @@
 
-
 #define OSCILLATORBANK_MAX_OSC 8
 #define ABS(value) (((value) >= 0) ? (value) : -(value))
 #define CLAMP(value, min, max) ((value) < (min) ? (min) : (((value) > (max)) ? (max) : (value)))
@@ -8,11 +7,11 @@ typedef struct Oscillator
 {
     int16_t *pWaveTable;
     uint32_t phase, phaseInc;
-    uint32_t frequencyMilliHz;
+    int32_t frequencyMilliHz;
     /* frequency = (frequencyRatio10000/10000) * frequencyMilliHz/1000 */
     /* e.g., 5000 = .5 * oscillator frequency = 1 octive below */
-    uint32_t frequencyRatio10000; //
-    uint32_t tableStepSize;
+    int32_t frequencyRatio10000; //
+    int32_t tableStepSize;
 } Oscillator;
 
 typedef struct Sampler
@@ -27,8 +26,8 @@ typedef struct OscillatorBank
 {
     Oscillator oscs[OSCILLATORBANK_MAX_OSC];
     uint8_t numOscillators;
-    int16_t detuneMilliHz[OSCILLATORBANK_MAX_OSC];
-    uint32_t frequencyMilliHz;
+    int32_t detuneMilliHz[OSCILLATORBANK_MAX_OSC];
+    int32_t frequencyMilliHz;
 } OscillatorBank;
 
 typedef struct Ramp
@@ -80,8 +79,8 @@ typedef struct LPFilter
     float b1;
     float b2;
     float Fc;
-    uint32_t frequencyMilliHz;
-    uint32_t signal;
+    int32_t frequencyMilliHz;
+    int32_t signal;
     float Q;
     float z1;
     float z2;
@@ -92,8 +91,10 @@ typedef struct Mixer
     uint16_t in_1, in_2, out_1;
 } Mixer;
 
+typedef int32_t frequency_t;
+
 #define MIDINOTETOFREQARRAYCOUNT 128
-uint32_t midiNoteToFreqMilliHz[MIDINOTETOFREQARRAYCOUNT] = {0};
+int32_t midiNoteToFreqMilliHz[MIDINOTETOFREQARRAYCOUNT] = {0};
 #define SCALECOUNT 12
 uint8_t scaleNoteToMidiNote[SCALECOUNT] =
     {
@@ -115,7 +116,7 @@ uint8_t scaleNoteToMidiNote[SCALECOUNT] =
 #define MAX_VOLUME INT16_MAX
 uint16_t amplitude_cb_to_linear_table[AMPLITUDE_CB_TO_LINEAR_TABLE_SIZE];
 
-#define SEQUENCER_NUM_INSTRUMENTS 5
+#define SEQUENCER_NUM_INSTRUMENTS 6
 #define SEQUENCER_NUM_BARS 4
 #define SEQUENCER_BEATS_PER_BAR 4
 #define SEQUENCER_SUBDIVISIONS_PER_BEAT 4
@@ -126,12 +127,20 @@ typedef enum SequencerCommand
     SEQUENCERCOMMAND_WAIT = 0,
     SEQUENCERCOMMAND_NOTEOFF,
     SEQUENCERCOMMAND_NOTEON
+    /*
+    SEQUENCERCOMMAND_NOTEON
+    SequencerEvent.data is 8 bit unsigned char array with 4 elements
+    0: midi note number
+    1: note velocity (0 - 255) *not implemented*
+    2: repetitions (0 - 254), 255 = infinite
+    3: unused
+    */
 } SequencerCommand;
 
 typedef struct SequencerEvent
 {
     SequencerCommand command;
-    unsigned int data;
+    uint8_t data[4];
 } SequencerEvent;
 
 typedef struct Instrument
@@ -139,14 +148,15 @@ typedef struct Instrument
     OscillatorBank oscBank0, oscBank1;
     ADSR adsr0_amp, adsr1_amp, adsr_filter;
     LPFilter lpFilter;
-    int32_t signal, frequencyMillliHz;
+    int32_t signal, frequencyMilliHz;
     int32_t oscBank0FreqOffsetMilliHz, oscBank1FreqOffsetMilliHz;
     int32_t oscBank0FreqRatio10000, oscBank1FreqRatio10000;
     int16_t levelOsc04096, levelOsc14096, gainCB;
+    uint8_t velocity;
 } Instrument;
 typedef struct InstrumentSequencer
 {
-    unsigned int instrumentId;
+    uint8_t instrumentId;
     Instrument *pInst;
     Sampler *pSampler;
     SequencerEvent events[SEQUENCER_NUM_EVENTS]; // 4/4 16th note subdivision
@@ -154,16 +164,16 @@ typedef struct InstrumentSequencer
 
 typedef struct MasterSequencer
 {
-    unsigned int bar;
-    unsigned int beat;
-    unsigned int subdivision;
+    uint8_t bar;
+    uint8_t beat;
+    uint8_t subdivision;
     float timeMS;
     float sequenceLengthMS;
-    unsigned int barLengthMS;
-    unsigned int beatLengthMS;
-    unsigned int subdivisionLengthMS;
-    unsigned int bpm;
-    unsigned int numInstruments;
+    uint32_t barLengthMS;
+    uint32_t beatLengthMS;
+    uint32_t subdivisionLengthMS;
+    uint32_t bpm;
+    uint32_t numInstruments;
     InstrumentSequencer *pInstruments[SEQUENCER_NUM_INSTRUMENTS];
 } MasterSequencer;
 
@@ -173,12 +183,13 @@ int32_t OscillatorBankReadOffset(OscillatorBank *oscBank, uint16_t step);
 void LPFilterCalculate(LPFilter *filter);
 int32_t LPFilterTick(LPFilter *filter, int32_t inputSignal);
 int32_t adjustSignalVolume(int32_t signal, int16_t volumeCB);
-void OscillatorBankSetFrequency(OscillatorBank *oscBank, uint32_t frequencyMilliHz);
+void OscillatorBankSetFrequency(OscillatorBank *oscBank, int32_t frequencyMilliHz);
 void ADSRNoteEvent(ADSR *adsr, bool noteStart, bool noteRelease);
 void ADSRTick(ADSR *adsr);
 void OscillatorBankAdvance(OscillatorBank *oscBank, uint16_t step);
 void Sampler_Play(Sampler *pSampler);
 void Sampler_Stop(Sampler *pSampler);
+void Instrument_SetVelocity(Instrument *pInst, uint8_t velocity);
 
 void init_mtof()
 {
@@ -186,10 +197,10 @@ void init_mtof()
     {
         float a = 440; // frequency of A
         float freqf = (a / 32) * pow(2, ((i - 9) / 12.0));
-        midiNoteToFreqMilliHz[i] = (uint32_t)floor(freqf * 1000);
+        midiNoteToFreqMilliHz[i] = (int32_t)floor(freqf * 1000);
     }
 }
-uint32_t scaleNoteToFreqMilliHz(uint8_t note) // note is scale tone less than SCALECOUNT
+int32_t scaleNoteToFreqMilliHz(uint8_t note) // note is scale tone less than SCALECOUNT
 {
     // ESP_LOGI(TAG, "scaleNoteToFreqMilliHz note = %u freq = %lu", note, midiNoteToFreqMilliHz[scaleNoteToMidiNote[note]]);
     return midiNoteToFreqMilliHz[scaleNoteToMidiNote[note]];
@@ -214,6 +225,7 @@ void Instrument_Tick(Instrument *pInst, uint16_t step)
     signal += (signal_osc0 * pInst->levelOsc04096) / 4096;
     signal += (signal_osc1 * pInst->levelOsc14096) / 4096;
     signal /= 2;
+    signal = (signal * pInst->velocity) / 255;
     // signal = signal_osc0;
     /*
     if (step % 32 == 0)
@@ -229,12 +241,22 @@ void Instrument_Tick(Instrument *pInst, uint16_t step)
     // pInst->signal = signal_osc0;
     pInst->signal = signal;
 }
-void Instrument_SetFreq(Instrument *pInst, uint32_t frequencyMilliHz)
+void Instrument_SetVelocity(Instrument *pInst, uint8_t velocity)
 {
-    pInst->frequencyMillliHz = frequencyMilliHz;
-    // ESP_LOGI(TAG, "setting instrument frequency to %ld millihz", frequencyMilliHz);
-    OscillatorBankSetFrequency(&pInst->oscBank0, ((frequencyMilliHz + pInst->oscBank0FreqOffsetMilliHz) * pInst->oscBank0FreqRatio10000) / 10000);
-    OscillatorBankSetFrequency(&pInst->oscBank1, ((frequencyMilliHz + pInst->oscBank1FreqOffsetMilliHz) * pInst->oscBank1FreqRatio10000) / 10000);
+    pInst->velocity = velocity;
+}
+void Instrument_SetFreq(Instrument *pInst, int32_t frequencyMilliHz)
+{
+    assert(frequencyMilliHz >= 0);
+    pInst->frequencyMilliHz = frequencyMilliHz;
+    // int32_t targetFreq_0 = (uint32_t)((((int32_t)frequencyMilliHz + pInst->oscBank0FreqOffsetMilliHz) * pInst->oscBank0FreqRatio10000) / 10000);
+    int32_t targetFreq_0 = ((frequencyMilliHz + pInst->oscBank0FreqOffsetMilliHz) * (int64_t)pInst->oscBank0FreqRatio10000) / 10000;
+    // int32_t targetFreq_1 = (uint32_t)((((int32_t)frequencyMilliHz + pInst->oscBank1FreqOffsetMilliHz) * pInst->oscBank1FreqRatio10000) / 10000);
+    int32_t targetFreq_1 = ((frequencyMilliHz + pInst->oscBank1FreqOffsetMilliHz) * (int64_t)pInst->oscBank1FreqRatio10000) / 10000;
+    // ESP_LOGI(TAG, "Instrument_SetFreq Instrument: %p oscBank0 setting instrument frequency to %ld millihz (%ld + %ld) * %ld / 10000", pInst, targetFreq_0, frequencyMilliHz, pInst->oscBank0FreqOffsetMilliHz, pInst->oscBank0FreqRatio10000);
+    // ESP_LOGI(TAG, "Instrument_SetFreq Instrument: %p oscBank1 setting instrument frequency to %ld millihz (%ld + %ld) * %ld / 10000", pInst, targetFreq_1, frequencyMilliHz, pInst->oscBank1FreqOffsetMilliHz, pInst->oscBank1FreqRatio10000);
+    OscillatorBankSetFrequency(&pInst->oscBank0, targetFreq_0);
+    OscillatorBankSetFrequency(&pInst->oscBank1, targetFreq_1);
 }
 void Instrument_NoteOn(Instrument *pInst)
 {
@@ -323,33 +345,36 @@ void OscillatorAdvance(Oscillator *osc, uint16_t step)
     osc->phase += osc->phaseInc * step;
 }
 
-void OscillatorSetFrequency(Oscillator *osc, uint32_t frequencyMilliHz)
+void OscillatorSetFrequency(Oscillator *osc, int32_t frequencyMilliHz)
 {
+    assert(frequencyMilliHz >= 0);
     osc->frequencyMilliHz = frequencyMilliHz;
     // osc->phaseInc = ((uint64_t)UINT32_MAX / CONFIG_EXAMPLE_AUDIO_SAMPLE_RATE * frequencyMilliHz * osc->frequencyRatio10000) / (1000 * 10000);
-    osc->phaseInc = ((uint64_t)UINT32_MAX / SAMPLE_RATE * frequencyMilliHz) / (1000);
-    // ESP_LOGI(TAG, "Setting frequency for oscillator %p  = %lu phaseInc = %lu", (void *)osc, osc->frequencyMilliHz, osc->phaseInc);
+    osc->phaseInc = ((uint64_t)UINT32_MAX / SAMPLE_RATE * (uint32_t)frequencyMilliHz) / 1000;
+    // ESP_LOGI(TAG, "Setting frequency for oscillator %p  = %ld phaseInc = %lu", (void *)osc, osc->frequencyMilliHz, osc->phaseInc);
 }
 
-void OscillatorBankSetFrequency(OscillatorBank *oscBank, uint32_t frequencyMilliHz)
+void OscillatorBankSetFrequency(OscillatorBank *oscBank, int32_t frequencyMilliHz)
 {
+    assert(frequencyMilliHz >= 0);
     oscBank->frequencyMilliHz = frequencyMilliHz;
 
     for (int i = 0; i < oscBank->numOscillators; i++)
     {
-        // ESP_LOGI(TAG, "oscBank %p: setting oscillator %p frequency to %lu", (void *)oscBank, (void *)&oscBank->oscs[i], frequencyMilliHz + oscBank->detuneMilliHz[i]);
+        // ESP_LOGI(TAG, "oscBank %p: setting oscillator %p frequency to %ld (%ld + %ld)", (void *)oscBank, (void *)&oscBank->oscs[i], frequencyMilliHz + oscBank->detuneMilliHz[i], frequencyMilliHz, oscBank->detuneMilliHz[i]);
         OscillatorSetFrequency(&oscBank->oscs[i], frequencyMilliHz + oscBank->detuneMilliHz[i]);
     }
 }
 
-void OscillatorBankSetDetune(OscillatorBank *oscBank, uint32_t frequencyMilliHz)
+void OscillatorBankSetDetune(OscillatorBank *oscBank, int32_t frequencyMilliHz)
 {
-
-    int16_t detuneMilliHzStep = frequencyMilliHz / oscBank->numOscillators;
-    int16_t startingDetuneMilliHz = oscBank->numOscillators / 2 * -detuneMilliHzStep;
-    for (int16_t i = 0; i < oscBank->numOscillators; i++)
+    assert(frequencyMilliHz >= 0);
+    int32_t detuneMilliHzStep = frequencyMilliHz / oscBank->numOscillators;
+    int32_t startingDetuneMilliHz = oscBank->numOscillators / 2 * -detuneMilliHzStep;
+    for (uint8_t i = 0; i < oscBank->numOscillators; i++)
     {
         oscBank->detuneMilliHz[i] = startingDetuneMilliHz + detuneMilliHzStep * i;
+        // ESP_LOGI(TAG, "oscBank %p: detuneMilliHz[%u]: %ld", (void *)oscBank, i, oscBank->detuneMilliHz[i]);
     }
     OscillatorBankSetFrequency(oscBank, oscBank->frequencyMilliHz);
 }
@@ -695,41 +720,70 @@ void LPFilterDebug(LPFilter *filter)
     ESP_LOGI(TAG, "frequencyMilliHz = %lu Q = %.2f signal = %lu a0 = %.2f a1 = %.2f a2 = %.2f b1 = %.2f b2 = %.2f Fc = %.2f z1 = %.2f z2 = %.2f", filter->frequencyMilliHz, filter->Q, filter->signal, filter->a0, filter->a1, filter->a2, filter->b1, filter->b2, filter->Fc, filter->z1, filter->z2);
 }
 
-void InstrumentSequencer_Init(InstrumentSequencer *pInstrumentSequencer, unsigned int instrumentId)
+void InstrumentSequencer_InitEvent(SequencerEvent *e)
+{
+    e->command = SEQUENCERCOMMAND_WAIT;
+    for (int j = 0; j < 4; j++)
+    {
+        e->data[j] = 0;
+    }
+}
+void InstrumentSequencer_Init(InstrumentSequencer *pInstrumentSequencer, uint8_t instrumentId)
 {
     pInstrumentSequencer->instrumentId = instrumentId;
     for (int i = 0; i < SEQUENCER_NUM_EVENTS; i++)
     {
-        pInstrumentSequencer->events[i].command = SEQUENCERCOMMAND_WAIT;
-        pInstrumentSequencer->events[i].data = 0;
+        InstrumentSequencer_InitEvent(&pInstrumentSequencer->events[i]);
     }
 }
-void InstrumentSequencer_NoteOn(InstrumentSequencer *pInstrumentSequencer, unsigned int bar, unsigned int beat, unsigned int subdivision, unsigned int midiNoteNum)
+void InstrumentSequencer_NoteOn(InstrumentSequencer *pInstrumentSequencer, uint8_t bar, uint8_t beat, uint8_t subdivision, uint8_t midiNoteNum, uint8_t velocity, uint8_t repetitions)
 {
     unsigned int index = bar * SEQUENCER_BEATS_PER_BAR * SEQUENCER_SUBDIVISIONS_PER_BEAT + beat * SEQUENCER_SUBDIVISIONS_PER_BEAT + subdivision;
     assert(index < SEQUENCER_NUM_EVENTS);
     pInstrumentSequencer->events[index].command = SEQUENCERCOMMAND_NOTEON;
-    pInstrumentSequencer->events[index].data = midiNoteNum;
+    pInstrumentSequencer->events[index].data[0] = midiNoteNum;
+    pInstrumentSequencer->events[index].data[1] = velocity;
+    pInstrumentSequencer->events[index].data[2] = repetitions;
 }
-void InstrumentSequencer_NoteOff(InstrumentSequencer *pInstrumentSequencer, unsigned int bar, unsigned int beat, unsigned int subdivision)
+void InstrumentSequencer_NoteOff(InstrumentSequencer *pInstrumentSequencer, uint8_t bar, uint8_t beat, uint8_t subdivision, uint8_t repetitions)
 {
     unsigned int index = bar * SEQUENCER_BEATS_PER_BAR * SEQUENCER_SUBDIVISIONS_PER_BEAT + beat * SEQUENCER_SUBDIVISIONS_PER_BEAT + subdivision;
     assert(index < SEQUENCER_NUM_EVENTS);
     pInstrumentSequencer->events[index].command = SEQUENCERCOMMAND_NOTEOFF;
+    pInstrumentSequencer->events[index].data[2] = repetitions;
 }
-void InstrumentSequencer_setPosition(InstrumentSequencer *pInstrumentSequencer, unsigned int bar, unsigned int beat, unsigned int subdivision)
+void InstrumentSequencer_setPosition(InstrumentSequencer *pInstrumentSequencer, uint8_t bar, uint8_t beat, uint8_t subdivision)
 {
     unsigned int index = bar * SEQUENCER_BEATS_PER_BAR * SEQUENCER_SUBDIVISIONS_PER_BEAT + beat * SEQUENCER_SUBDIVISIONS_PER_BEAT + subdivision;
     assert(index < SEQUENCER_NUM_EVENTS);
     SequencerEvent *pEvent = &pInstrumentSequencer->events[index];
+
+    if (pEvent->command == SEQUENCERCOMMAND_WAIT)
+    {
+        return;
+    }
+
+    // printf("[ID %u] ", pInstrumentSequencer->instrumentId);
+    // Debug_SequencerEvent(&pInstrumentSequencer->events[index]);
+    if (pEvent->data[2] == 0)
+    {
+        InstrumentSequencer_InitEvent(pEvent);
+        return;
+    }
+    else if (pEvent->data[2] != 255) // repetitions
+    {
+        pEvent->data[2]--;
+    }
+
     if (pEvent->command == SEQUENCERCOMMAND_NOTEON)
     {
-        // printf("[ID %u] ", pInstrumentSequencer->instrumentId);
-        // Debug_SequencerEvent(&pInstrumentSequencer->events[index]);
-        assert(pEvent->data < MIDINOTETOFREQARRAYCOUNT);
+
+        assert(pEvent->data[0] < MIDINOTETOFREQARRAYCOUNT);
         if (pInstrumentSequencer->pInst != NULL)
         {
-            Instrument_SetFreq(pInstrumentSequencer->pInst, midiNoteToFreqMilliHz[pEvent->data]);
+            // ESP_LOGI(TAG, "InstrumentSequencer_setPosition [SEQUENCERCOMMAND_NOTEON] freq[%u]: %lu, velocity: %u", pEvent->data[0], midiNoteToFreqMilliHz[pEvent->data[0]], pEvent->data[1]);
+            Instrument_SetFreq(pInstrumentSequencer->pInst, midiNoteToFreqMilliHz[pEvent->data[0]]);
+            Instrument_SetVelocity(pInstrumentSequencer->pInst, pEvent->data[1]);
             Instrument_NoteOn(pInstrumentSequencer->pInst);
         }
         else if (pInstrumentSequencer->pSampler != NULL)
@@ -759,7 +813,7 @@ void InstrumentSequencer_RegisterSampler(InstrumentSequencer *pInstrumentSeq, Sa
     pInstrumentSeq->pInst = NULL;
     pInstrumentSeq->pSampler = pSampler;
 }
-void MasterSequencer_Init(MasterSequencer *pMasterSequencer, unsigned int bpm)
+void MasterSequencer_Init(MasterSequencer *pMasterSequencer, uint8_t bpm)
 {
     pMasterSequencer->bar = SEQUENCER_NUM_BARS;
     pMasterSequencer->beat = 0;
@@ -807,7 +861,7 @@ void MasterSequencer_Step(MasterSequencer *pMasterSequencer, float elapsedMillis
 
 void Debug_SequencerEvent(SequencerEvent *e)
 {
-    printf("SequencerEvent %u: %u\n", e->command, e->data);
+    printf("SequencerEvent %u: %u %u %u %u\n", e->command, e->data[0], e->data[1], e->data[2], e->data[3]);
 }
 
 void Debug_InstrumentSequencer_plot(InstrumentSequencer *pInstrumentSequencer)

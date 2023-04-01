@@ -44,7 +44,7 @@ uint16_t samplebuffer_readptr, samplebuffer_writeptr;
 uint32_t cnt = 0;
 int16_t val = 0;
 
-#define NUM_OSC 1
+#define NUM_OSC 3
 #define NUM_INSTRUMENTS 5
 #define NUM_SAMPLERS 7
 
@@ -242,13 +242,21 @@ uint8_t getTouchData(void)
         {
             status = 1;
             // ESP_LOGI(TAG, "setting freq to %lu", scaleNoteToFreqMilliHz(i));
-            if (i % 2 == 0)
-                Instrument_SetFreq(&instruments[1], scaleNoteToFreqMilliHz(i));
-            if (i % 2 == 1)
-                Instrument_SetFreq(&instruments[0], scaleNoteToFreqMilliHz(i));
-            if (i < NUM_SAMPLERS)
-                Sampler_Play(&samplers[i]);
-                // OscillatorBankSetFrequency(&oscBank, scaleNoteToFreqMilliHz(i));
+
+            Instrument_SetFreq(&instruments[0], scaleNoteToFreqMilliHz(i));
+            Instrument_SetVelocity(&instruments[0], 255);
+            Instrument_NoteOn(&instruments[0]);
+
+            // ESP_LOGI(TAG, "adding note %u to %u:%u:%u", scaleNoteToMidiNote[i] + 12, mseq.bar, mseq.beat, mseq.subdivision);
+            // InstrumentSequencer_NoteOn(&iseqs[1], mseq.bar, mseq.beat, mseq.subdivision, scaleNoteToMidiNote[i] + 12, 255, 3);
+            uint8_t beatoff = (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR;
+            // uint8_t baroff = beatoff < mseq.beat ? (mseq.bar + 1) % SEQUENCER_NUM_BARS : mseq.bar;
+            uint8_t baroff = (mseq.bar + 2) % SEQUENCER_NUM_BARS;
+            // ESP_LOGI(TAG, "adding note %u to %u:%u:%u", scaleNoteToMidiNote[i], baroff, beatoff, mseq.subdivision);
+            // InstrumentSequencer_NoteOn(&iseqs[5], baroff, beatoff, mseq.subdivision, scaleNoteToMidiNote[i], 255, 3);
+            //  if (i < NUM_SAMPLERS)
+            //     Sampler_Play(&samplers[i]);
+            //   OscillatorBankSetFrequency(&oscBank, scaleNoteToFreqMilliHz(i));
 #ifdef ENABLE_HAPTIC_MOTOR
             haptic_start();
 #endif
@@ -256,6 +264,12 @@ uint8_t getTouchData(void)
         else if (MPR121_isNewRelease(&dev, i))
         {
             // ESP_LOGI(TAG, "electrode %d was just released", i);
+            // InstrumentSequencer_NoteOff(&iseqs[1], mseq.bar, mseq.beat, mseq.subdivision, 3);
+            uint8_t beatoff = (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR;
+            // uint8_t baroff = beatoff < mseq.beat ? (mseq.bar + 1) % SEQUENCER_NUM_BARS : mseq.bar;
+            uint8_t baroff = (mseq.bar + 2) % SEQUENCER_NUM_BARS;
+            // InstrumentSequencer_NoteOff(&iseqs[5], baroff, beatoff, mseq.subdivision, 3);
+            Instrument_NoteOff(&instruments[0]);
             status = 2;
         }
     }
@@ -275,6 +289,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
         uint16_t volume_ch_2 = 0;
         uint16_t volume_ch_3 = 0;
         uint16_t volume_ch_4 = 0;
+        uint16_t volume_ch_5 = 0;
 
         /* Receive the event from callback and load the data into the DMA buffer until the whole audio loaded */
         // while (byte_written < data_size)
@@ -356,13 +371,14 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                 if (ABS(volume_ch_1 - (int32_t)sliderValues[1]) > 20)
                 {
                     volume_ch_1 = sliderValues[1];
+                    volume_ch_2 = sliderValues[1];
                     ESP_LOGI(TAG, "volume ch 1 = %u", volume_ch_1);
                 }
-                if (ABS(volume_ch_2 - (int32_t)sliderValues[2]) > 20)
+                if (ABS(volume_ch_3 - (int32_t)sliderValues[2]) > 20)
                 {
-                    volume_ch_2 = sliderValues[2];
                     volume_ch_3 = sliderValues[2];
                     volume_ch_4 = sliderValues[2];
+                    volume_ch_5 = sliderValues[2];
                     ESP_LOGI(TAG, "volume ch 2 = %u", volume_ch_2);
                 }
 
@@ -388,7 +404,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                 MasterSequencer_Step(&mseq, SAMPLE_PERIOD);
                 Instrument_Tick(&instruments[0], i);
                 Instrument_Tick(&instruments[1], i);
-                // Instrument_Tick(&instruments[2], i);
+                Instrument_Tick(&instruments[2], i);
                 // Instrument_Tick(&instruments[3], i);
                 // Instrument_Tick(&instruments[4], i);
                 int32_t signal_samples = 0;
@@ -401,9 +417,10 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
 
                 int32_t signal0 = instruments[0].signal;
                 int32_t signal1 = instruments[1].signal;
-                int32_t signal2 = ((int32_t)samplers[0].signal - 127) * 32;
-                int32_t signal3 = ((int32_t)samplers[1].signal - 127) * 32;
-                int32_t signal4 = ((int32_t)samplers[2].signal - 127) * 32;
+                int32_t signal2 = instruments[2].signal;
+                int32_t signal3 = ((int32_t)samplers[0].signal - 127) * 32;
+                int32_t signal4 = ((int32_t)samplers[1].signal - 127) * 32;
+                int32_t signal5 = ((int32_t)samplers[2].signal - 127) * 32;
 
                 int32_t mix =
                     (signal0 * 65536) / (volume_ch_0 + 1) +
@@ -411,7 +428,8 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                     (signal2 * 65536) / (volume_ch_2 + 1) +
                     (signal3 * 65536) / (volume_ch_3 + 1) +
                     (signal4 * 65536) / (volume_ch_4 + 1) +
-                    (signal_samples * 65536) / 16;
+                    (signal5 * 65536) / (volume_ch_5 + 1);
+                //(signal_samples * 65536) / 16;
                 // mix = adjustSignalVolume(mix, gainCB);
                 mix = LPFilterTick(&lpFilter, mix);
                 mix = mix / 65536;
@@ -556,11 +574,11 @@ void initSequencer_arp(uint16_t id)
         {
 
             note = (note + noteInc) % SCALECOUNT;
-            InstrumentSequencer_NoteOn(&iseqs[id], bar, beat, 0, scaleNoteToMidiNote[note]);
-            InstrumentSequencer_NoteOff(&iseqs[id], bar, beat, 1);
+            InstrumentSequencer_NoteOn(&iseqs[id], bar, beat, 0, scaleNoteToMidiNote[note], beat * (255 / SEQUENCER_BEATS_PER_BAR), 1);
+            InstrumentSequencer_NoteOff(&iseqs[id], bar, beat, 1, 1);
             note = (note + noteInc) % SCALECOUNT;
-            InstrumentSequencer_NoteOn(&iseqs[id], bar, beat, 2, scaleNoteToMidiNote[note]);
-            InstrumentSequencer_NoteOff(&iseqs[id], bar, beat, 3);
+            InstrumentSequencer_NoteOn(&iseqs[id], bar, beat, 2, scaleNoteToMidiNote[note], 255 - beat * (255 / SEQUENCER_BEATS_PER_BAR), 1);
+            InstrumentSequencer_NoteOff(&iseqs[id], bar, beat, 3, 1);
             noteInc += beat;
         }
     }
@@ -570,17 +588,17 @@ void initSequencer_bass(uint16_t id)
 {
     assert(id < SEQUENCER_NUM_INSTRUMENTS);
     int bar = 0;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[1] - 12);
-    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0);
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[1] - 12, 255, 1);
+    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
     bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[5] - 12);
-    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0);
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[5] - 12, 255, 1);
+    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
     bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12);
-    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0);
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12, 255, 1);
+    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
     bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12);
-    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0);
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12, 255, 1);
+    InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
 
     // Debug_InstrumentSequencer_list(&iseqs[id]);
 }
@@ -593,18 +611,18 @@ void initSequencer_drums(uint16_t id_kick, uint16_t id_snare, uint16_t id_hh)
         {
             if (beat == 0 || beat == 2)
             {
-                InstrumentSequencer_NoteOn(&iseqs[id_kick], bar, beat, 0, 20);
-                InstrumentSequencer_NoteOff(&iseqs[id_kick], bar, beat, 1);
+                InstrumentSequencer_NoteOn(&iseqs[id_kick], bar, beat, 0, 20, 255, 255);
+                InstrumentSequencer_NoteOff(&iseqs[id_kick], bar, beat, 1, 255);
             }
             else if (beat == 1 || beat == 3)
             {
-                InstrumentSequencer_NoteOn(&iseqs[id_snare], bar, beat, 0, 35);
-                InstrumentSequencer_NoteOff(&iseqs[id_snare], bar, beat, 1);
+                InstrumentSequencer_NoteOn(&iseqs[id_snare], bar, beat, 0, 35, 255, 255);
+                InstrumentSequencer_NoteOff(&iseqs[id_snare], bar, beat, 1, 255);
             }
-            InstrumentSequencer_NoteOn(&iseqs[id_hh], bar, beat, 0, 80);
-            InstrumentSequencer_NoteOff(&iseqs[id_hh], bar, beat, 1);
-            InstrumentSequencer_NoteOn(&iseqs[id_hh], bar, beat, 2, 80);
-            InstrumentSequencer_NoteOff(&iseqs[id_hh], bar, beat, 3);
+            InstrumentSequencer_NoteOn(&iseqs[id_hh], bar, beat, 0, 80, 255, 255);
+            InstrumentSequencer_NoteOff(&iseqs[id_hh], bar, beat, 1, 255);
+            InstrumentSequencer_NoteOn(&iseqs[id_hh], bar, beat, 2, 80, 255, 255);
+            InstrumentSequencer_NoteOff(&iseqs[id_hh], bar, beat, 3, 255);
         }
     }
     // Debug_InstrumentSequencer_list(&iseqs[id]);
@@ -617,7 +635,7 @@ void initInstruments(void)
     {
         OscillatorSetWaveTable(&instruments[0].oscBank0.oscs[i], &wave_table_saw[0]);
         instruments[0].oscBank0.numOscillators++;
-        OscillatorSetWaveTable(&instruments[0].oscBank1.oscs[i], &wave_table_triangle[0]);
+        OscillatorSetWaveTable(&instruments[0].oscBank1.oscs[i], &wave_table_noise[0]);
         instruments[0].oscBank1.numOscillators++;
     }
 
@@ -625,22 +643,30 @@ void initInstruments(void)
     instruments[0].oscBank1FreqOffsetMilliHz = 0;
     instruments[0].oscBank0FreqRatio10000 = 10000;
     instruments[0].oscBank1FreqRatio10000 = 10000;
+    Instrument_SetFreq(&instruments[0], 220000);
     OscillatorBankSetDetune(&instruments[0].oscBank0, 0);
     OscillatorBankSetDetune(&instruments[0].oscBank1, 0);
-    Instrument_SetFreq(&instruments[0], 220000);
 
-    ADSRInitialize(&instruments[0].adsr0_amp, 4095);
-    ADSRInitialize(&instruments[0].adsr1_amp, 4095);
+    ADSRInitialize(&instruments[0].adsr0_amp, 3600);
+    ADSRInitialize(&instruments[0].adsr1_amp, 1000);
     ADSRInitialize(&instruments[0].adsr_filter, 4095);
+
+    RampSetTime(&instruments[0].adsr0_amp.attack, 1000);
+    RampSetTime(&instruments[0].adsr0_amp.decay, 500);
+    RampSetTime(&instruments[0].adsr0_amp.release, 2000);
+
+    RampSetTime(&instruments[0].adsr1_amp.attack, 1000);
+    RampSetTime(&instruments[0].adsr1_amp.decay, 1000);
+    RampSetTime(&instruments[0].adsr1_amp.release, 1000);
 
     instruments[0].lpFilter.z1 = 0;
     instruments[0].lpFilter.z2 = 0;
     instruments[0].lpFilter.Q = 1;
-    instruments[0].lpFilter.frequencyMilliHz = 1000000;
+    instruments[0].lpFilter.frequencyMilliHz = 600000;
     LPFilterCalculate(&instruments[0].lpFilter);
 
     instruments[0].levelOsc04096 = 4096;
-    instruments[0].levelOsc14096 = 4096;
+    instruments[0].levelOsc14096 = 0;
     instruments[0].gainCB = -248;
 
     // instrument 1 - bass
@@ -664,11 +690,11 @@ void initInstruments(void)
     ADSRInitialize(&instruments[1].adsr1_amp, 4095);
     ADSRInitialize(&instruments[1].adsr_filter, 4095);
 
-    RampSetTime(&instruments[1].adsr0_amp.attack, 5000);
+    RampSetTime(&instruments[1].adsr0_amp.attack, 10000);
     RampSetTime(&instruments[1].adsr0_amp.decay, 500);
     RampSetTime(&instruments[1].adsr0_amp.release, 20000);
 
-    RampSetTime(&instruments[1].adsr1_amp.attack, 1000);
+    RampSetTime(&instruments[1].adsr1_amp.attack, 10000);
     RampSetTime(&instruments[1].adsr1_amp.decay, 1000);
     RampSetTime(&instruments[1].adsr1_amp.release, 1000);
 
@@ -685,10 +711,10 @@ void initInstruments(void)
     instruments[1].levelOsc14096 = 4096;
     instruments[1].gainCB = -248;
 
-    // instrument 2 - kick
+    // instrument 2 - 2nd delay
     for (int i = 0; i < NUM_OSC; i++)
     {
-        OscillatorSetWaveTable(&instruments[2].oscBank0.oscs[i], &wave_table_sine[0]);
+        OscillatorSetWaveTable(&instruments[2].oscBank0.oscs[i], &wave_table_saw[0]);
         instruments[2].oscBank0.numOscillators++;
         OscillatorSetWaveTable(&instruments[2].oscBank1.oscs[i], &wave_table_noise[0]);
         instruments[2].oscBank1.numOscillators++;
@@ -697,22 +723,22 @@ void initInstruments(void)
     instruments[2].oscBank0FreqOffsetMilliHz = 0;
     instruments[2].oscBank1FreqOffsetMilliHz = 0;
     instruments[2].oscBank0FreqRatio10000 = 10000;
-    instruments[2].oscBank1FreqRatio10000 = 5000;
+    instruments[2].oscBank1FreqRatio10000 = 10000;
     OscillatorBankSetDetune(&instruments[2].oscBank0, 0);
     OscillatorBankSetDetune(&instruments[2].oscBank1, 0);
     Instrument_SetFreq(&instruments[2], 220000);
 
-    ADSRInitialize(&instruments[2].adsr0_amp, 1024);
-    ADSRInitialize(&instruments[2].adsr1_amp, 1024);
-    ADSRInitialize(&instruments[2].adsr_filter, 1024);
+    ADSRInitialize(&instruments[2].adsr0_amp, 4096);
+    ADSRInitialize(&instruments[2].adsr1_amp, 2048);
+    ADSRInitialize(&instruments[2].adsr_filter, 4096);
 
-    RampSetTime(&instruments[2].adsr0_amp.attack, 5);
+    RampSetTime(&instruments[2].adsr0_amp.attack, 10000);
     RampSetTime(&instruments[2].adsr0_amp.decay, 50);
-    RampSetTime(&instruments[2].adsr0_amp.release, 100);
+    RampSetTime(&instruments[2].adsr0_amp.release, 500);
 
-    RampSetTime(&instruments[2].adsr1_amp.attack, 2);
-    RampSetTime(&instruments[2].adsr1_amp.decay, 40);
-    RampSetTime(&instruments[2].adsr1_amp.release, 50);
+    RampSetTime(&instruments[2].adsr1_amp.attack, 10000);
+    RampSetTime(&instruments[2].adsr1_amp.decay, 20);
+    RampSetTime(&instruments[2].adsr1_amp.release, 20);
 
     RampSetTime(&instruments[2].adsr_filter.attack, 1000);
     RampSetTime(&instruments[2].adsr_filter.decay, 1000);
@@ -721,7 +747,7 @@ void initInstruments(void)
     instruments[2].lpFilter.z1 = 0;
     instruments[2].lpFilter.z2 = 0;
     instruments[2].lpFilter.Q = 6;
-    instruments[2].lpFilter.frequencyMilliHz = 100000;
+    instruments[2].lpFilter.frequencyMilliHz = 700000;
     LPFilterCalculate(&instruments[2].lpFilter);
     instruments[2].levelOsc04096 = 4096;
     instruments[2].levelOsc14096 = 4096;
@@ -852,6 +878,7 @@ void app_main(void)
     initSequencer();
     initSequencer_addInstrument(&instruments[0], 0);
     initSequencer_addInstrument(&instruments[1], 1);
+    initSequencer_addInstrument(&instruments[2], 5);
     // initSequencer_addInstrument(&instruments[2], 2);
     // initSequencer_addInstrument(&instruments[3], 3);
     // initSequencer_addInstrument(&instruments[4], 4);
@@ -860,8 +887,8 @@ void app_main(void)
     initSequencer_addSampler(&samplers[1], 3);
     initSequencer_addSampler(&samplers[2], 4);
 
-    initSequencer_arp(0);
-    initSequencer_bass(1);
+    // initSequencer_arp(0);
+    // initSequencer_bass(1);
     initSequencer_drums(2, 3, 4);
 
     lpFilter.z1 = 0;
