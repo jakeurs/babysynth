@@ -2,6 +2,7 @@
 #include "instrument.h"
 #include "samples.h"
 #include "ledMatrix.h"
+#include "SerialInterface.h"
 
 #include "mpr121.h"
 #define CONFIG_I2C_ADDRESS 0x5A
@@ -47,8 +48,12 @@ int16_t val = 0;
 #define NUM_OSC 3
 #define NUM_INSTRUMENTS 5
 #define NUM_SAMPLERS 7
+#define NUM_CHANNELS NUM_INSTRUMENTS + NUM_SAMPLERS
 
 MasterSequencer mseq;
+
+int32_t channelLevels[NUM_CHANNELS];
+
 InstrumentSequencer iseqs[SEQUENCER_NUM_INSTRUMENTS];
 Instrument instruments[NUM_INSTRUMENTS];
 Sampler samplers[NUM_SAMPLERS];
@@ -59,12 +64,15 @@ int32_t displayData[16];
 #define SIGNAL_DISPLAY_TIMER_MAX 8;
 uint8_t signalDisplayTimer = SIGNAL_DISPLAY_TIMER_MAX;
 
+QueueHandle_t *pSerialInterface_msg_queue;
+
 adc_oneshot_unit_handle_t adc1_handle;
 adc_oneshot_unit_init_cfg_t init_config1 = {
     .unit_id = ADC_UNIT_1,
     .ulp_mode = ADC_ULP_MODE_DISABLE,
 };
-
+void initSequencer_arp(uint16_t id, int32_t startingBar);
+void initSequencer_bass(uint16_t id, int32_t startingBar);
 void haptic_init(void)
 {
     // zero-initialize the config structure.
@@ -167,25 +175,6 @@ static esp_err_t mpu6050_register_write_byte(uint8_t reg_addr, uint8_t data)
 /**
  * @brief i2c master initialization
  */
-/*
-static esp_err_t i2c_master_init(void)
-{
-    int i2c_master_port = I2C_MASTER_NUM;
-
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_MASTER_SDA_IO,
-        .scl_io_num = I2C_MASTER_SCL_IO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-    };
-
-    i2c_param_config(i2c_master_port, &conf);
-
-    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
-}
-*/
 
 static bool IRAM_ATTR dac_on_convert_done_callback(dac_continuous_handle_t handle, const dac_event_data_t *event, void *user_data)
 {
@@ -240,20 +229,40 @@ uint8_t getTouchData(void)
     {
         if (MPR121_isNewTouch(&dev, i))
         {
+            if (i == 10) {
+                initSequencer_arp(0, mseq.bar);
+                return 0;
+            } else if (i == 11) {
+                initSequencer_bass(1, mseq.bar);
+                return 0;
+            }
             status = 1;
             // ESP_LOGI(TAG, "setting freq to %lu", scaleNoteToFreqMilliHz(i));
-
+            
             Instrument_SetFreq(&instruments[0], scaleNoteToFreqMilliHz(i));
             Instrument_SetVelocity(&instruments[0], 255);
             Instrument_NoteOn(&instruments[0]);
 
             // ESP_LOGI(TAG, "adding note %u to %u:%u:%u", scaleNoteToMidiNote[i] + 12, mseq.bar, mseq.beat, mseq.subdivision);
-            // InstrumentSequencer_NoteOn(&iseqs[1], mseq.bar, mseq.beat, mseq.subdivision, scaleNoteToMidiNote[i] + 12, 255, 3);
-            uint8_t beatoff = (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR;
-            // uint8_t baroff = beatoff < mseq.beat ? (mseq.bar + 1) % SEQUENCER_NUM_BARS : mseq.bar;
-            uint8_t baroff = (mseq.bar + 2) % SEQUENCER_NUM_BARS;
+            uint8_t baroff = (mseq.bar + 1) % SEQUENCER_NUM_BARS;
+            InstrumentSequencer_NoteOn(&iseqs[1], baroff, mseq.beat, mseq.subdivision, scaleNoteToMidiNote[i], 255, 1);
+            uint8_t subdivoff = (mseq.subdivision + 1) % SEQUENCER_SUBDIVISIONS_PER_BEAT;
+            uint8_t beatoff = subdivoff != mseq.subdivision + 1 ? (mseq.beat + 1) % SEQUENCER_BEATS_PER_BAR : mseq.beat;
+            baroff = beatoff < mseq.beat ? (baroff + 1) % SEQUENCER_NUM_BARS: baroff;
+            InstrumentSequencer_NoteOff(&iseqs[1], baroff, beatoff, subdivoff, 1);
+            
+            
+            beatoff = (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR;
+            baroff = beatoff != mseq.beat + 2 ? (mseq.bar + 2) % SEQUENCER_NUM_BARS : (mseq.bar + 1) % SEQUENCER_NUM_BARS;
             // ESP_LOGI(TAG, "adding note %u to %u:%u:%u", scaleNoteToMidiNote[i], baroff, beatoff, mseq.subdivision);
-            // InstrumentSequencer_NoteOn(&iseqs[5], baroff, beatoff, mseq.subdivision, scaleNoteToMidiNote[i], 255, 3);
+            InstrumentSequencer_NoteOn(&iseqs[5], baroff, beatoff, mseq.subdivision, scaleNoteToMidiNote[i], 255, 1);
+
+            subdivoff = (mseq.subdivision + 1) % SEQUENCER_SUBDIVISIONS_PER_BEAT;
+            beatoff = subdivoff != mseq.subdivision + 1 ? (beatoff + 1) % SEQUENCER_BEATS_PER_BAR : beatoff;
+            baroff = beatoff < (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR ? (baroff + 1) % SEQUENCER_NUM_BARS: baroff;  
+
+            InstrumentSequencer_NoteOff(&iseqs[5], baroff, beatoff, subdivoff, 1);
+            
             //  if (i < NUM_SAMPLERS)
             //     Sampler_Play(&samplers[i]);
             //   OscillatorBankSetFrequency(&oscBank, scaleNoteToFreqMilliHz(i));
@@ -261,19 +270,270 @@ uint8_t getTouchData(void)
             haptic_start();
 #endif
         }
+        
         else if (MPR121_isNewRelease(&dev, i))
         {
             // ESP_LOGI(TAG, "electrode %d was just released", i);
-            // InstrumentSequencer_NoteOff(&iseqs[1], mseq.bar, mseq.beat, mseq.subdivision, 3);
-            uint8_t beatoff = (mseq.beat + 2) % SEQUENCER_BEATS_PER_BAR;
+            /*
+            InstrumentSequencer_NoteOff(&iseqs[1], mseq.bar, mseq.beat, mseq.subdivision, 1);
+            uint8_t beatoff = (mseq.beat + SEQUENCER_BEATS_PER_BAR - 2) % SEQUENCER_BEATS_PER_BAR;
             // uint8_t baroff = beatoff < mseq.beat ? (mseq.bar + 1) % SEQUENCER_NUM_BARS : mseq.bar;
-            uint8_t baroff = (mseq.bar + 2) % SEQUENCER_NUM_BARS;
-            // InstrumentSequencer_NoteOff(&iseqs[5], baroff, beatoff, mseq.subdivision, 3);
+            uint8_t baroff = (mseq.bar + SEQUENCER_NUM_BARS - 2) % SEQUENCER_NUM_BARS;
+            InstrumentSequencer_NoteOff(&iseqs[5], baroff, beatoff, mseq.subdivision, 1);
+            */
             Instrument_NoteOff(&instruments[0]);
             status = 2;
         }
+        
     }
     return status;
+}
+
+void printParamsToConsole(Instrument *pInst)
+{
+    printf("Parameters for instrument %p\n", pInst);
+    printf("    Oscillator bank 0\n");
+    printf("        [ob0.v]Volume: %ld/4096\n", pInst->oscBank0.volume4096);
+    printf("        [ob0.fo]Frequency offset: %ld mHz\n", pInst->oscBank0FreqOffsetMilliHz);
+    printf("        [ob0.fr]Frequency ratio (x10000): %ld\n", pInst->oscBank0FreqRatio10000);
+    printf("        [ob0.dt]Detune: %ld mHz\n", pInst->oscBank0.detuneMilliHzTotal);
+    printf("        Oscillators (%d):\n", pInst->oscBank0.numOscillators);
+    for (int i = 0; i < pInst->oscBank0.numOscillators; i++)
+    {
+        printf("            [%d] Oscillator (%p) frequency (%ld mHz) detune (%ld mHz) phaseInc (%lu) wave table (%p)\n", i, &pInst->oscBank0.oscs[i], pInst->oscBank0.oscs[i].frequencyMilliHz, pInst->oscBank0.detuneMilliHz[i], pInst->oscBank0.oscs[i].phaseInc, (void *)pInst->oscBank0.oscs[i].pWaveTable);
+    }
+    printf("        Envelope\n");
+    printf("            [ob0.a]Attack: %lu\n", (pInst->adsr0_amp.attack.durationSamples * 1000) / SAMPLE_RATE);
+    printf("            [ob0.d]Decay: %lu\n", (pInst->adsr0_amp.decay.durationSamples * 1000) / SAMPLE_RATE);
+    printf("            [ob0.s]Sustain Level: %u/4096\n", pInst->adsr0_amp.sustainLevel);
+    printf("            [ob0.r]Release: %lu\n", (pInst->adsr0_amp.release.durationSamples * 1000) / SAMPLE_RATE);
+
+    printf("    Oscillator bank 1\n");
+    printf("        [ob1.v]Volume: %ld/4096\n", pInst->oscBank1.volume4096);
+    printf("        [ob1.fo]Frequency offset (mHz): %ld\n", pInst->oscBank1FreqOffsetMilliHz);
+    printf("        [ob1.fr]Frequency ratio (x10000): %ld\n", pInst->oscBank1FreqRatio10000);
+    printf("        [ob1.dt]Detune: %ld mHz\n", pInst->oscBank1.detuneMilliHzTotal);
+    printf("        Oscillators (%d):\n", pInst->oscBank1.numOscillators);
+    for (int i = 0; i < pInst->oscBank1.numOscillators; i++)
+    {
+        printf("            [%d] Oscillator (%p) frequency (%ld mHz) detune (%ld mHz) phaseInc (%lu) wave table (%p)\n", i, &pInst->oscBank0.oscs[i], pInst->oscBank0.oscs[i].frequencyMilliHz, pInst->oscBank1.detuneMilliHz[i], pInst->oscBank1.oscs[i].phaseInc, (void *)pInst->oscBank1.oscs[i].pWaveTable);
+    }
+    printf("        Envelope\n");
+    printf("            [ob1.a]Attack: %lu\n", (pInst->adsr1_amp.attack.durationSamples * 1000) / SAMPLE_RATE);
+    printf("            [ob1.d]Decay: %lu\n", (pInst->adsr1_amp.decay.durationSamples * 1000) / SAMPLE_RATE);
+    printf("            [ob1.s]Sustain Level: %u/4096\n", pInst->adsr1_amp.sustainLevel);
+    printf("            [ob1.r]Release: %lu\n", (pInst->adsr1_amp.release.durationSamples * 1000) / SAMPLE_RATE);
+    printf("    Low Pass Filter\n");
+    printf("        [lpf]Frequency: %lu mHz\n", pInst->lpFilter.frequencyMilliHz);
+    printf("        [lpq]Q: %f\n", pInst->lpFilter.Q);
+    printf("        a0[%f] a1[%f] a2[%f] b1[%f] b2[%f] Fc[%f] z1[%f] z2[%f]\n", pInst->lpFilter.a0, pInst->lpFilter.a1, pInst->lpFilter.a2, pInst->lpFilter.b1, pInst->lpFilter.b2, pInst->lpFilter.Fc, pInst->lpFilter.z1, pInst->lpFilter.z2);
+}
+
+void cli_setWaveTable(int32_t index, OscillatorBank *pOscBank) {
+    int16_t *pWaveTable;
+    switch (index) {
+    case 0:
+        pWaveTable = &wave_table_sine[0];
+        printf("setting oscillator bank [%p] wavetable to sine [%p]\n", pOscBank, pWaveTable);
+        break;
+    case 1:
+        pWaveTable = &wave_table_square[0];
+        printf("setting oscillator bank [%p] wavetable to square [%p]\n", pOscBank, pWaveTable);
+        break;
+    case 2:
+        pWaveTable = &wave_table_saw[0];
+        printf("setting oscillator bank [%p] wavetable to saw [%p]\n", pOscBank, pWaveTable);
+        break;
+    case 3:
+        pWaveTable = &wave_table_triangle[0];
+        printf("setting oscillator bank [%p] wavetable to triangle [%p]\n", pOscBank, pWaveTable);
+        break;
+    case 4:
+        pWaveTable = &wave_table_noise[0];
+        printf("setting oscillator bank [%p] wavetable to noise [%p]\n", pOscBank, pWaveTable);
+        break;
+    default:
+        printf("Invalid wavetable index [%ld]. Valid options are:\n 0 = sine\n 1 = square\n 2 = saw\n 3 = triangle\n 4 = noise\n", index);
+        return;
+    }
+    for (int i = 0; i < NUM_OSC; i++)
+    {
+        OscillatorSetWaveTable(&pOscBank->oscs[i], pWaveTable);
+    }
+}
+
+void changeParam(Instrument *pInst, SERIALDATA_PARAM param, SERIALDATA_VALUE value)
+{
+    printf("changeParam Instrument[%p]: param[%ld] value[%ld]\n", pInst, (int32_t)param, (int32_t)value);
+    if (pInst == NULL)
+    {
+        printf("Invalid instrument\n");
+        return;
+    }
+    uint32_t samples = 0;
+    switch (param)
+    {
+    case SERIALDATA_PARAM_OB0_V:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 volume = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank0.volume4096 = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB1_V:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 volume = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank1.volume4096 = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB0_FO:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 frequency offset = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank0FreqOffsetMilliHz = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB1_FO:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 frequency offset = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank1FreqOffsetMilliHz = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB0_FR:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 frequency ratio = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank0FreqRatio10000 = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB1_FR:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 frequency ratio = %ld\n", pInst, (int32_t)value);
+        pInst->oscBank1FreqRatio10000 = (int32_t)value;
+        break;
+    case SERIALDATA_PARAM_OB0_DT:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 detune = %ld\n", pInst, (int32_t)value);
+        OscillatorBankSetDetune(&pInst->oscBank0, (int32_t)value);
+        break;
+    case SERIALDATA_PARAM_OB1_DT:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 detune = %ld\n", pInst, (int32_t)value);
+        OscillatorBankSetDetune(&pInst->oscBank1, (int32_t)value);
+        break;
+    case SERIALDATA_PARAM_OB0_A:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 0 Envelope Attack = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr0_amp.attack, samples);
+        break;
+    case SERIALDATA_PARAM_OB1_A:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 1 Envelope Attack = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr1_amp.attack, samples);
+        break;
+    case SERIALDATA_PARAM_OB0_D:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 0 Envelope Decay = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr0_amp.decay, samples);
+        break;
+    case SERIALDATA_PARAM_OB1_D:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 1 Envelope Decay = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr1_amp.decay, samples);
+        break;
+    case SERIALDATA_PARAM_OB0_S:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 Envelope Sustain = %u/4096\n", pInst, (uint16_t)value);
+        ADSRSetSustain(&pInst->adsr0_amp, (uint16_t)value);
+        break;
+    case SERIALDATA_PARAM_OB1_S:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 Envelope Sustain = %u/4096\n", pInst, (uint16_t)value);
+        ADSRSetSustain(&pInst->adsr1_amp, (uint16_t)value);
+        break;
+    case SERIALDATA_PARAM_OB0_R:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 0 Envelope Release = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr0_amp.release, samples);
+        break;
+    case SERIALDATA_PARAM_OB1_R:
+        samples = (int32_t)value * SAMPLE_RATE / 1000;
+        printf("Instrument[%p]: Setting Oscillator Bank 1 Envelope Release = %ld ms\n", pInst, (int32_t)value);
+        RampSetTime(&pInst->adsr1_amp.release, samples);
+        break;
+    case SERIALDATA_PARAM_OB0_WT:
+        printf("Instrument[%p]: Setting Oscillator Bank 0 Wavetable = %ld\n", pInst, (int32_t)value);
+        cli_setWaveTable((int32_t)value, &pInst->oscBank0);
+        break;
+    case SERIALDATA_PARAM_OB1_WT:
+        printf("Instrument[%p]: Setting Oscillator Bank 1 Wavetable = %ld\n", pInst, (int32_t)value);
+        cli_setWaveTable((int32_t)value, &pInst->oscBank1);
+        break;
+    case SERIALDATA_PARAM_LP_F:
+        printf("Instrument[%p]: Setting Low Pass Filter Frequency = %ld mHz\n", pInst, (int32_t)value);
+        pInst->lpFilter.frequencyMilliHz = (int32_t)value;
+        LPFilterCalculate(&pInst->lpFilter);
+        break;
+    case SERIALDATA_PARAM_LP_Q:
+        float v = (float)(int32_t)value / 10000.0;
+        printf("Instrument[%p]: Setting Low Pass Filter Q = %f\n", pInst, v);
+        pInst->lpFilter.Q = v;
+        LPFilterCalculate(&pInst->lpFilter);
+        break;
+    default:
+        // nothing
+    }
+}
+
+void parseSerialMessage(SerialDataMessage *pMsg)
+{
+    Instrument *pInst = NULL;
+    if (pMsg->target == SERIALDATA_TARGET_INST0)
+        pInst = &instruments[0];
+    else if (pMsg->target == SERIALDATA_TARGET_INST1)
+        pInst = &instruments[1];
+    else if (pMsg->target == SERIALDATA_TARGET_INST2)
+        pInst = &instruments[2];
+    // todo: add sample based instrument information
+
+    if (pMsg->param == SERIALDATA_PARAM_NONE)
+    {
+        return;
+    }
+    if (pMsg->param == SERIALDATA_PARAM_VOL_4096)
+    {
+        printf("parseSerialMessage - setting volume for channel %ld to %ld\r\n", (int32_t)pMsg->target, (int32_t)pMsg->value);
+        if (pMsg->target == SERIALDATA_TARGET_INST0)
+            channelLevels[1] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_INST1)
+            channelLevels[2] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_INST2)
+            channelLevels[3] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_KICK)
+            channelLevels[4] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_SNARE)
+            channelLevels[5] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_HH)
+            channelLevels[6] = (int32_t)pMsg->value;
+        else if (pMsg->target == SERIALDATA_TARGET_ALL)
+        {
+            channelLevels[0] = (int32_t)pMsg->value;
+            printf("parseSerialMessage - setting GLOBAL volume %ld\r\n", channelLevels[0]);
+        }
+    }
+    else if (pMsg->param == SERIALDATA_PARAM_VIEWPARAMS)
+    {
+        if (pInst != NULL)
+            printParamsToConsole(pInst);
+        else
+            printf("invalid instrument\n");
+        // todo: add sample based instrument information
+    }
+    else
+    {
+        changeParam(pInst, pMsg->param, pMsg->value);
+    }
+}
+
+void getSerialData()
+{
+    SerialDataMessage msg;
+    msg.target = SERIALDATA_TARGET_NONE;
+    if (*pSerialInterface_msg_queue != 0)
+    {
+        xQueueReceive(*pSerialInterface_msg_queue, &msg, (TickType_t)0);
+        if (msg.target != SERIALDATA_TARGET_NONE)
+        {
+            printf("Message received: target [%ld] param [%ld] value [%ld]\n", (int32_t)msg.target, (int32_t)msg.param, (int32_t)msg.value);
+            parseSerialMessage(&msg);
+        }
+    }
+    else
+    {
+        printf("ERROR: failed to access queue.");
+    }
 }
 
 static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueHandle_t que, uint8_t *data, size_t data_size)
@@ -283,20 +543,13 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
     {
         // printf("Play count: %" PRIu32 "\n", cnt++);
         dac_event_data_t evt_data;
-        int16_t gainCB = -1000; //-248 is nice
-        uint16_t volume_ch_0 = 0;
-        uint16_t volume_ch_1 = 0;
-        uint16_t volume_ch_2 = 0;
-        uint16_t volume_ch_3 = 0;
-        uint16_t volume_ch_4 = 0;
-        uint16_t volume_ch_5 = 0;
 
         /* Receive the event from callback and load the data into the DMA buffer until the whole audio loaded */
         // while (byte_written < data_size)
         while (1)
         {
 
-            // oscPeriodMS = 6.810504;
+            /*todo: switch to checking for elapsed time instead of iterations*/
             if (cnt++ > 5)
             {
 #ifdef ENABLE_HAPTIC_MOTOR
@@ -305,54 +558,12 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
 
                 uint8_t touchStatus = getTouchData();
 
-                if (touchStatus == 1)
-                {
-                    // ADSRNoteEvent(&adsr, true, false);
-                    // ADSRNoteEvent(&adsrFilter, true, false);
-                    // Instrument_NoteOn(&instruments[1]);
-                }
-                else if (touchStatus == 2)
-                {
-                    // Instrument_NoteOff(&instruments[1]);
-                    //  ADSRNoteEvent(&adsr, false, true);
-                    //  ADSRNoteEvent(&adsrFilter, false, true);
-                }
+                getSerialData();
 
                 getADCData();
-                gainCB = -(4095 - sliderValues[0]) / 4;
-                /*
-                uint32_t attackSteps = sliderValues[2] * 50;
-                uint32_t decaySteps = sliderValues[3] * 50;
-                uint32_t releaseSteps = sliderValues[4] * 250;
 
-                if (ABS((int32_t)adsrTarget->attack.durationSamples - (int32_t)attackSteps) > 10000)
-                {
-                    // ESP_LOGI(TAG, "(int32_t)adsr.attack.durationSamples = %ld (int32_t)attackSteps = %ld res = %ld ABS(res) = %ld", (int32_t)adsr.attack.durationSamples, (int32_t)attackSteps, (int32_t)adsr.attack.durationSamples - (int32_t)attackSteps, ABS((int32_t)adsr.attack.durationSamples - (int32_t)attackSteps));
-                    // ESP_LOGI(TAG, "envelope = %u attack = %lu", adsr.envelope, attackSteps);
-                    RampSetTime(&adsrTarget->attack, attackSteps);
-                }
-                if (ABS((int32_t)adsrTarget->decay.durationSamples - (int32_t)decaySteps) > 10000)
-                {
-                    // ESP_LOGI(TAG, "envelope = %u decay %lu", adsr.envelope, decaySteps);
-                    RampSetTime(&adsrTarget->decay, decaySteps);
-                }
-                if (ABS((int32_t)adsr.release.durationSamples - (int32_t)releaseSteps) > 10000)
-                {
-                    // ESP_LOGI(TAG, "envelope = %u release = %lu", adsr.envelope, releaseSteps);
-                    RampSetTime(&adsrTarget->release, releaseSteps);
-                }
-                */
-                // OscillatorBankSetDetune(&oscBank, detuneMilliHz);
-
-                // ESP_LOGI(TAG, "gainCB = %d detuneMilliHz = %u", gainCB, detuneMilliHz);
-                //  ESP_LOGI(TAG, "envelope = %u attack = %u decay %u release = %u", envelope, attackSteps, decaySteps, releaseSteps);
-                // plotRamps(&adsr);
-                // plotRamps(&adsrFilter);
-                // sliderValues[0] = 400;
-                // sliderValues[1] = 400;
-                // sliderValues[2] = 0;
-                // sliderValues[3] = 4096;
-
+                // todo: hysteresis function - put in helper header file
+                
                 if (ABS(lpFilter.Q * 512 - (int32_t)sliderValues[3]) > 200)
                 {
                     lpFilter.Q = sliderValues[3] / 512.0;
@@ -363,27 +574,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                     lpFilter.frequencyMilliHz = sliderValues[4] * 1000;
                     LPFilterCalculate(&lpFilter);
                 }
-                if (ABS(volume_ch_0 - (int32_t)sliderValues[0]) > 20)
-                {
-                    volume_ch_0 = sliderValues[0];
-                    ESP_LOGI(TAG, "volume ch 0 = %u", volume_ch_0);
-                }
-                if (ABS(volume_ch_1 - (int32_t)sliderValues[1]) > 20)
-                {
-                    volume_ch_1 = sliderValues[1];
-                    volume_ch_2 = sliderValues[1];
-                    ESP_LOGI(TAG, "volume ch 1 = %u", volume_ch_1);
-                }
-                if (ABS(volume_ch_3 - (int32_t)sliderValues[2]) > 20)
-                {
-                    volume_ch_3 = sliderValues[2];
-                    volume_ch_4 = sliderValues[2];
-                    volume_ch_5 = sliderValues[2];
-                    ESP_LOGI(TAG, "volume ch 2 = %u", volume_ch_2);
-                }
-
-                // volume_ch_0 = 3600;
-                // volume_ch_1 = 3600;
+                
 
                 cnt = 0;
             }
@@ -415,6 +606,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                         signal_samples += ((int32_t)samplers[j].signal - 127) * 32;
                 }
 
+                // todo: change to for loop
                 int32_t signal0 = instruments[0].signal;
                 int32_t signal1 = instruments[1].signal;
                 int32_t signal2 = instruments[2].signal;
@@ -423,16 +615,23 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                 int32_t signal5 = ((int32_t)samplers[2].signal - 127) * 32;
 
                 int32_t mix =
-                    (signal0 * 65536) / (volume_ch_0 + 1) +
-                    (signal1 * 65536) / (volume_ch_1 + 1) +
-                    (signal2 * 65536) / (volume_ch_2 + 1) +
-                    (signal3 * 65536) / (volume_ch_3 + 1) +
-                    (signal4 * 65536) / (volume_ch_4 + 1) +
-                    (signal5 * 65536) / (volume_ch_5 + 1);
+                    (signal0 * channelLevels[1]) / 4096 +
+                    (signal1 * channelLevels[2]) / 4096 +
+                    (signal2 * channelLevels[3]) / 4096 +
+                    (signal3 * channelLevels[4]) / 4096 +
+                    (signal4 * channelLevels[5]) / 4096 +
+                    (signal5 * channelLevels[6]) / 4096;
+
+                mix = LPFilterTick(&lpFilter, mix);
+
+                mix = mix * channelLevels[0] / 65536;
+
                 //(signal_samples * 65536) / 16;
                 // mix = adjustSignalVolume(mix, gainCB);
-                mix = LPFilterTick(&lpFilter, mix);
-                mix = mix / 65536;
+
+                // mix = mix / 4096;
+
+                // mix = instruments[0].signal * channelLevels[0] / 512;
 
                 mix = mix > 127 ? 127 : mix;
                 mix = mix < -127 ? -127 : mix;
@@ -442,6 +641,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                 // data[samplebuffer_writeptr] = 0;
 
                 samplebuffer_writeptr++;
+                // todo: this is a slow division
                 samplebuffer_writeptr %= SAMPLEBUFFER_SIZE - 512;
 
                 waveformPeriodTracker += SAMPLE_PERIOD;
@@ -449,6 +649,7 @@ static void dac_write_data_asynchronously(dac_continuous_handle_t handle, QueueH
                     waveformPeriodTracker -= oscPeriodMS;
 
                 uint8_t bin = (uint8_t)floorf(waveformPeriodTracker / displayDataBinSizeFloat);
+                // todo: fix this
                 if (bin < 16) // rare error when switching notes where bin size is larger than 16
                 {
                     // display output
@@ -540,7 +741,7 @@ void initWaveTable_noise(void)
         a = a ^ (a >> 4);
         a = a * 0x27d4eb2d;
         a = a ^ (a >> 15);
-        wave_table_noise[i] = a;
+        wave_table_noise[i] = a * (UINT16_MAX/16);
     }
 }
 
@@ -563,12 +764,12 @@ void initSequencer_addSampler(Sampler *pSampler, uint16_t id)
     assert(id < SEQUENCER_NUM_INSTRUMENTS);
     InstrumentSequencer_RegisterSampler(&iseqs[id], pSampler);
 }
-void initSequencer_arp(uint16_t id)
+void initSequencer_arp(uint16_t id, int32_t startingBar)
 {
     assert(id < SEQUENCER_NUM_INSTRUMENTS);
     int note = 0;
     int noteInc = 1;
-    for (int bar = 0; bar < SEQUENCER_NUM_BARS; bar++)
+    for (int bar = startingBar; bar < SEQUENCER_NUM_BARS; bar++)
     {
         for (int beat = 0; beat < SEQUENCER_BEATS_PER_BAR; beat++)
         {
@@ -584,20 +785,20 @@ void initSequencer_arp(uint16_t id)
     }
     // Debug_InstrumentSequencer_list(&iseqs[id]);
 }
-void initSequencer_bass(uint16_t id)
+void initSequencer_bass(uint16_t id, int32_t startingBar)
 {
     assert(id < SEQUENCER_NUM_INSTRUMENTS);
-    int bar = 0;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[1] - 12, 255, 1);
+    int bar = startingBar;
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[1], 255, 1);
     InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
-    bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[5] - 12, 255, 1);
+    bar = (bar + 1) % SEQUENCER_NUM_BARS;
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[5], 255, 1);
     InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
-    bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12, 255, 1);
+    bar = (bar + 1) % SEQUENCER_NUM_BARS;
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4], 255, 1);
     InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
-    bar++;
-    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4] - 12, 255, 1);
+    bar = (bar + 1) % SEQUENCER_NUM_BARS;
+    InstrumentSequencer_NoteOn(&iseqs[id], bar, 0, 0, scaleNoteToMidiNote[4], 255, 1);
     InstrumentSequencer_NoteOff(&iseqs[id], bar, 3, 0, 1);
 
     // Debug_InstrumentSequencer_list(&iseqs[id]);
@@ -630,12 +831,20 @@ void initSequencer_drums(uint16_t id_kick, uint16_t id_snare, uint16_t id_hh)
 
 void initInstruments(void)
 {
+    /*
+    todo:
+    - enum to name instruments
+    - table style initialization for instruments a la teensy docs
+
+    */
     // instrument 0 - lead
+    OscillatorBankSetVolume(&instruments[0].oscBank0, 4096);
+    OscillatorBankSetVolume(&instruments[0].oscBank1, 1024);
     for (int i = 0; i < NUM_OSC; i++)
     {
-        OscillatorSetWaveTable(&instruments[0].oscBank0.oscs[i], &wave_table_saw[0]);
+        OscillatorSetWaveTable(&instruments[0].oscBank0.oscs[i], &wave_table_sine[0]);
         instruments[0].oscBank0.numOscillators++;
-        OscillatorSetWaveTable(&instruments[0].oscBank1.oscs[i], &wave_table_noise[0]);
+        OscillatorSetWaveTable(&instruments[0].oscBank1.oscs[i], &wave_table_square[0]);
         instruments[0].oscBank1.numOscillators++;
     }
 
@@ -648,28 +857,30 @@ void initInstruments(void)
     OscillatorBankSetDetune(&instruments[0].oscBank1, 0);
 
     ADSRInitialize(&instruments[0].adsr0_amp, 3600);
-    ADSRInitialize(&instruments[0].adsr1_amp, 1000);
+    ADSRInitialize(&instruments[0].adsr1_amp, 50);
     ADSRInitialize(&instruments[0].adsr_filter, 4095);
 
-    RampSetTime(&instruments[0].adsr0_amp.attack, 1000);
-    RampSetTime(&instruments[0].adsr0_amp.decay, 500);
-    RampSetTime(&instruments[0].adsr0_amp.release, 2000);
+    RampSetTime(&instruments[0].adsr0_amp.attack, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[0].adsr0_amp.decay, 20 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[0].adsr0_amp.release, 83 * SAMPLE_RATE / 1000);
 
-    RampSetTime(&instruments[0].adsr1_amp.attack, 1000);
-    RampSetTime(&instruments[0].adsr1_amp.decay, 1000);
-    RampSetTime(&instruments[0].adsr1_amp.release, 1000);
+    RampSetTime(&instruments[0].adsr1_amp.attack, 5 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[0].adsr1_amp.decay, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[0].adsr1_amp.release, 41 * SAMPLE_RATE / 1000);
 
     instruments[0].lpFilter.z1 = 0;
     instruments[0].lpFilter.z2 = 0;
     instruments[0].lpFilter.Q = 1;
-    instruments[0].lpFilter.frequencyMilliHz = 600000;
+    instruments[0].lpFilter.frequencyMilliHz = 10000000;
     LPFilterCalculate(&instruments[0].lpFilter);
 
     instruments[0].levelOsc04096 = 4096;
-    instruments[0].levelOsc14096 = 0;
+    instruments[0].levelOsc14096 = 4096;
     instruments[0].gainCB = -248;
 
     // instrument 1 - bass
+    OscillatorBankSetVolume(&instruments[1].oscBank0, 4096);
+    OscillatorBankSetVolume(&instruments[1].oscBank1, 2048);
     for (int i = 0; i < NUM_OSC; i++)
     {
         OscillatorSetWaveTable(&instruments[1].oscBank0.oscs[i], &wave_table_sine[0]);
@@ -680,27 +891,23 @@ void initInstruments(void)
 
     instruments[1].oscBank0FreqOffsetMilliHz = 0;
     instruments[1].oscBank1FreqOffsetMilliHz = 0;
-    instruments[1].oscBank0FreqRatio10000 = 10000;
-    instruments[1].oscBank1FreqRatio10000 = 10000;
+    instruments[1].oscBank0FreqRatio10000 = 5000;
+    instruments[1].oscBank1FreqRatio10000 = 5000;
     OscillatorBankSetDetune(&instruments[1].oscBank0, 0);
     OscillatorBankSetDetune(&instruments[1].oscBank1, 0);
     Instrument_SetFreq(&instruments[1], 220000);
 
     ADSRInitialize(&instruments[1].adsr0_amp, 4095);
-    ADSRInitialize(&instruments[1].adsr1_amp, 4095);
+    ADSRInitialize(&instruments[1].adsr1_amp, 50);
     ADSRInitialize(&instruments[1].adsr_filter, 4095);
 
-    RampSetTime(&instruments[1].adsr0_amp.attack, 10000);
-    RampSetTime(&instruments[1].adsr0_amp.decay, 500);
-    RampSetTime(&instruments[1].adsr0_amp.release, 20000);
+    RampSetTime(&instruments[1].adsr0_amp.attack, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[1].adsr0_amp.decay, 20 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[1].adsr0_amp.release, 83 * SAMPLE_RATE / 1000);
 
-    RampSetTime(&instruments[1].adsr1_amp.attack, 10000);
-    RampSetTime(&instruments[1].adsr1_amp.decay, 1000);
-    RampSetTime(&instruments[1].adsr1_amp.release, 1000);
-
-    RampSetTime(&instruments[1].adsr_filter.attack, 1000);
-    RampSetTime(&instruments[1].adsr_filter.decay, 1000);
-    RampSetTime(&instruments[1].adsr_filter.release, 1000);
+    RampSetTime(&instruments[1].adsr1_amp.attack, 5 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[1].adsr1_amp.decay, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[1].adsr1_amp.release, 41 * SAMPLE_RATE / 1000);
 
     instruments[1].lpFilter.z1 = 0;
     instruments[1].lpFilter.z2 = 0;
@@ -712,6 +919,8 @@ void initInstruments(void)
     instruments[1].gainCB = -248;
 
     // instrument 2 - 2nd delay
+    OscillatorBankSetVolume(&instruments[2].oscBank0, 4096);
+    OscillatorBankSetVolume(&instruments[2].oscBank1, 2048);
     for (int i = 0; i < NUM_OSC; i++)
     {
         OscillatorSetWaveTable(&instruments[2].oscBank0.oscs[i], &wave_table_saw[0]);
@@ -722,38 +931,36 @@ void initInstruments(void)
 
     instruments[2].oscBank0FreqOffsetMilliHz = 0;
     instruments[2].oscBank1FreqOffsetMilliHz = 0;
-    instruments[2].oscBank0FreqRatio10000 = 10000;
-    instruments[2].oscBank1FreqRatio10000 = 10000;
+    instruments[2].oscBank0FreqRatio10000 = 20000;
+    instruments[2].oscBank1FreqRatio10000 = 20000;
     OscillatorBankSetDetune(&instruments[2].oscBank0, 0);
     OscillatorBankSetDetune(&instruments[2].oscBank1, 0);
     Instrument_SetFreq(&instruments[2], 220000);
 
     ADSRInitialize(&instruments[2].adsr0_amp, 4096);
-    ADSRInitialize(&instruments[2].adsr1_amp, 2048);
+    ADSRInitialize(&instruments[2].adsr1_amp, 50);
     ADSRInitialize(&instruments[2].adsr_filter, 4096);
 
-    RampSetTime(&instruments[2].adsr0_amp.attack, 10000);
-    RampSetTime(&instruments[2].adsr0_amp.decay, 50);
-    RampSetTime(&instruments[2].adsr0_amp.release, 500);
+    RampSetTime(&instruments[2].adsr0_amp.attack, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[2].adsr0_amp.decay, 20 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[2].adsr0_amp.release, 83 * SAMPLE_RATE / 1000);
 
-    RampSetTime(&instruments[2].adsr1_amp.attack, 10000);
-    RampSetTime(&instruments[2].adsr1_amp.decay, 20);
-    RampSetTime(&instruments[2].adsr1_amp.release, 20);
-
-    RampSetTime(&instruments[2].adsr_filter.attack, 1000);
-    RampSetTime(&instruments[2].adsr_filter.decay, 1000);
-    RampSetTime(&instruments[2].adsr_filter.release, 1000);
+    RampSetTime(&instruments[2].adsr1_amp.attack, 5 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[2].adsr1_amp.decay, 41 * SAMPLE_RATE / 1000);
+    RampSetTime(&instruments[2].adsr1_amp.release, 41 * SAMPLE_RATE / 1000);
 
     instruments[2].lpFilter.z1 = 0;
     instruments[2].lpFilter.z2 = 0;
     instruments[2].lpFilter.Q = 6;
-    instruments[2].lpFilter.frequencyMilliHz = 700000;
+    instruments[2].lpFilter.frequencyMilliHz = 1000000;
     LPFilterCalculate(&instruments[2].lpFilter);
     instruments[2].levelOsc04096 = 4096;
     instruments[2].levelOsc14096 = 4096;
     instruments[2].gainCB = -248;
 
     // instrument 3 - snare
+    OscillatorBankSetVolume(&instruments[3].oscBank0, 4096);
+    OscillatorBankSetVolume(&instruments[3].oscBank1, 4096);
     for (int i = 0; i < NUM_OSC; i++)
     {
         OscillatorSetWaveTable(&instruments[3].oscBank0.oscs[i], &wave_table_sine[0]);
@@ -796,6 +1003,8 @@ void initInstruments(void)
     instruments[3].gainCB = -248;
 
     // instrument 4 - hh
+    OscillatorBankSetVolume(&instruments[4].oscBank0, 4096);
+    OscillatorBankSetVolume(&instruments[4].oscBank1, 4096);
     for (int i = 0; i < NUM_OSC; i++)
     {
         OscillatorSetWaveTable(&instruments[4].oscBank0.oscs[i], &wave_table_noise[0]);
@@ -843,16 +1052,17 @@ void initSamplers()
     Sampler_Init(&samplers[0], &sample_kick[0], false);
     Sampler_Init(&samplers[1], &sample_snare[0], false);
     Sampler_Init(&samplers[2], &sample_hh[0], false);
-    Sampler_Init(&samplers[3], &sample_horse[0], false);
-    Sampler_Init(&samplers[4], &sample_cow[0], false);
-    Sampler_Init(&samplers[5], &sample_turkey[0], false);
-    Sampler_Init(&samplers[6], &sample_pig[0], false);
+    //Sampler_Init(&samplers[3], &sample_horse[0], false);
+    //Sampler_Init(&samplers[4], &sample_cow[0], false);
+    //Sampler_Init(&samplers[5], &sample_turkey[0], false);
+    //Sampler_Init(&samplers[6], &sample_pig[0], false);
     // Sampler_Init(&samplers[7], &sample_rooster[0], false);
     //  Sampler_Init(&samplers[8], &sample_sheep[0], false);
 }
 
 void app_main(void)
 {
+    pSerialInterface_msg_queue = initialize_SerialInterface();
     ESP_LOGI(TAG, "DAC audio example start");
     ESP_LOGI(TAG, "--------------------------------------");
 
@@ -873,6 +1083,18 @@ void app_main(void)
     initWaveTable_saw();
     initWaveTable_noise();
 
+    for (int i = 0; i < NUM_CHANNELS; i++)
+    {
+        channelLevels[i] = 0;
+    }
+    channelLevels[0] = 4096;
+    channelLevels[1] = 800; 
+    channelLevels[2] = 512; 
+    channelLevels[3] = 128; 
+    channelLevels[4] = 256; 
+    channelLevels[5] = 128; 
+    channelLevels[6] = 64; 
+
     initInstruments();
     initSamplers();
     initSequencer();
@@ -887,14 +1109,14 @@ void app_main(void)
     initSequencer_addSampler(&samplers[1], 3);
     initSequencer_addSampler(&samplers[2], 4);
 
-    // initSequencer_arp(0);
-    // initSequencer_bass(1);
+    // initSequencer_arp(0, 0);
+    // initSequencer_bass(1, 0);
     initSequencer_drums(2, 3, 4);
 
     lpFilter.z1 = 0;
     lpFilter.z2 = 0;
     lpFilter.Q = 1;
-    lpFilter.frequencyMilliHz = 2000000;
+    lpFilter.frequencyMilliHz = 10000000;
     LPFilterCalculate(&lpFilter);
 
     init_mtof();

@@ -192,7 +192,7 @@ void matrix_testMovingDot()
     matrix_cols[y] = matrix_cols[y] | 1 << x;
 }
 
-inline void matrix_setPixel(uint8_t x, uint8_t y)
+void matrix_setPixel(uint8_t x, uint8_t y)
 {
     if ((x > 16) || (y > 16))
         return;

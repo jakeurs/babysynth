@@ -26,8 +26,10 @@ typedef struct OscillatorBank
 {
     Oscillator oscs[OSCILLATORBANK_MAX_OSC];
     uint8_t numOscillators;
+    int32_t detuneMilliHzTotal;
     int32_t detuneMilliHz[OSCILLATORBANK_MAX_OSC];
     int32_t frequencyMilliHz;
+    int32_t volume4096;
 } OscillatorBank;
 
 typedef struct Ramp
@@ -117,7 +119,7 @@ uint8_t scaleNoteToMidiNote[SCALECOUNT] =
 uint16_t amplitude_cb_to_linear_table[AMPLITUDE_CB_TO_LINEAR_TABLE_SIZE];
 
 #define SEQUENCER_NUM_INSTRUMENTS 6
-#define SEQUENCER_NUM_BARS 4
+#define SEQUENCER_NUM_BARS 16
 #define SEQUENCER_BEATS_PER_BAR 4
 #define SEQUENCER_SUBDIVISIONS_PER_BEAT 4
 #define SEQUENCER_NUM_EVENTS SEQUENCER_NUM_BARS *SEQUENCER_BEATS_PER_BAR *SEQUENCER_SUBDIVISIONS_PER_BEAT
@@ -222,8 +224,8 @@ void Instrument_Tick(Instrument *pInst, uint16_t step)
     signal_osc1 = (signal_osc1 * pInst->adsr1_amp.envelope) / 4096;
 
     int32_t signal = 0;
-    signal += (signal_osc0 * pInst->levelOsc04096) / 4096;
-    signal += (signal_osc1 * pInst->levelOsc14096) / 4096;
+    signal += signal_osc0;
+    signal += signal_osc1;
     signal /= 2;
     signal = (signal * pInst->velocity) / 255;
     // signal = signal_osc0;
@@ -247,7 +249,8 @@ void Instrument_SetVelocity(Instrument *pInst, uint8_t velocity)
 }
 void Instrument_SetFreq(Instrument *pInst, int32_t frequencyMilliHz)
 {
-    assert(frequencyMilliHz >= 0);
+    //assert(frequencyMilliHz >= 0);
+    frequencyMilliHz = frequencyMilliHz < 0 || frequencyMilliHz > SAMPLE_RATE/2 * 1000? 0 : frequencyMilliHz;
     pInst->frequencyMilliHz = frequencyMilliHz;
     // int32_t targetFreq_0 = (uint32_t)((((int32_t)frequencyMilliHz + pInst->oscBank0FreqOffsetMilliHz) * pInst->oscBank0FreqRatio10000) / 10000);
     int32_t targetFreq_0 = ((frequencyMilliHz + pInst->oscBank0FreqOffsetMilliHz) * (int64_t)pInst->oscBank0FreqRatio10000) / 10000;
@@ -347,7 +350,8 @@ void OscillatorAdvance(Oscillator *osc, uint16_t step)
 
 void OscillatorSetFrequency(Oscillator *osc, int32_t frequencyMilliHz)
 {
-    assert(frequencyMilliHz >= 0);
+    //assert(frequencyMilliHz >= 0);
+    frequencyMilliHz = frequencyMilliHz < 0 || frequencyMilliHz > SAMPLE_RATE/2 * 1000 ? 0 : frequencyMilliHz;
     osc->frequencyMilliHz = frequencyMilliHz;
     // osc->phaseInc = ((uint64_t)UINT32_MAX / CONFIG_EXAMPLE_AUDIO_SAMPLE_RATE * frequencyMilliHz * osc->frequencyRatio10000) / (1000 * 10000);
     osc->phaseInc = ((uint64_t)UINT32_MAX / SAMPLE_RATE * (uint32_t)frequencyMilliHz) / 1000;
@@ -356,7 +360,8 @@ void OscillatorSetFrequency(Oscillator *osc, int32_t frequencyMilliHz)
 
 void OscillatorBankSetFrequency(OscillatorBank *oscBank, int32_t frequencyMilliHz)
 {
-    assert(frequencyMilliHz >= 0);
+    //assert(frequencyMilliHz >= 0);
+    frequencyMilliHz = frequencyMilliHz < 0 || frequencyMilliHz > SAMPLE_RATE/2 * 1000 ? 0 : frequencyMilliHz;
     oscBank->frequencyMilliHz = frequencyMilliHz;
 
     for (int i = 0; i < oscBank->numOscillators; i++)
@@ -369,6 +374,7 @@ void OscillatorBankSetFrequency(OscillatorBank *oscBank, int32_t frequencyMilliH
 void OscillatorBankSetDetune(OscillatorBank *oscBank, int32_t frequencyMilliHz)
 {
     assert(frequencyMilliHz >= 0);
+    oscBank->detuneMilliHzTotal = frequencyMilliHz;
     int32_t detuneMilliHzStep = frequencyMilliHz / oscBank->numOscillators;
     int32_t startingDetuneMilliHz = oscBank->numOscillators / 2 * -detuneMilliHzStep;
     for (uint8_t i = 0; i < oscBank->numOscillators; i++)
@@ -377,6 +383,10 @@ void OscillatorBankSetDetune(OscillatorBank *oscBank, int32_t frequencyMilliHz)
         // ESP_LOGI(TAG, "oscBank %p: detuneMilliHz[%u]: %ld", (void *)oscBank, i, oscBank->detuneMilliHz[i]);
     }
     OscillatorBankSetFrequency(oscBank, oscBank->frequencyMilliHz);
+}
+void OscillatorBankSetVolume(OscillatorBank *oscBank, int32_t vol4096)
+{
+    oscBank->volume4096 = vol4096;
 }
 
 int32_t OscillatorBankReadOffset(OscillatorBank *oscBank, uint16_t step)
@@ -389,6 +399,7 @@ int32_t OscillatorBankReadOffset(OscillatorBank *oscBank, uint16_t step)
         signal += val;
     }
     signal = signal / oscBank->numOscillators; // signal scaled to int16_max
+    signal = (signal * oscBank->volume4096) / 4096;
 
     // ESP_LOGI(TAG, "signal raw = %ld", signal);
     //  signal = signal / (oscBank->numOscillators / 2);
@@ -568,6 +579,7 @@ void testRamp(int length, int start, int stop, bool exp, bool steep)
     }
 }
 
+
 void ADSRNoteEvent(ADSR *adsr, bool noteStart, bool noteRelease)
 {
     if (noteStart)
@@ -675,6 +687,13 @@ void plotRamps(ADSR *adsr)
     ESP_LOGI(TAG, "%s (%u)", s, adsr->envelope);
 }
 
+
+void ADSRSetSustain(ADSR *adsr, uint16_t sustain) {
+    adsr->sustainLevel = sustain;
+    RampInitialize(&adsr->decay, adsr->decay.durationSamples, 4096, adsr->sustainLevel, false, false);
+    RampInitialize(&adsr->release, adsr->release.durationSamples, adsr->sustainLevel, 0, false, true);
+}
+
 void ADSRInitialize(ADSR *adsr, uint16_t sustainLevel)
 {
     adsr->envelope = 0;
@@ -704,13 +723,26 @@ void LPFilterCalculate(LPFilter *filter)
     filter->b1 = 2 * (K * K - 1) * norm;
     filter->b2 = (1 - K / filter->Q + K * K) * norm;
 }
-
+bool isreal(float f)
+{
+    long l;
+    l = *(long *)&f;
+    if (l == 0x7F800000) // +inf
+        return false;
+    if (l == 0xFF800000) // -inf
+        return false;
+    if (l == 0x7FFFFFFF) // NaN
+        return false; 
+    return true;
+}
 int32_t LPFilterTick(LPFilter *filter, int32_t inputSignal)
 {
     float in = (float)inputSignal / (float)INT16_MAX;
     float out = in * filter->a0 + filter->z1;
     filter->z1 = in * filter->a1 + filter->z2 - filter->b1 * out;
+    if (!isreal(filter->z1)) filter->z1 = 0; // not sure if this is the right way to handle it
     filter->z2 = in * filter->a2 - filter->b2 * out;
+    if (!isreal(filter->z2)) filter->z2 = 0;
     filter->signal = (int32_t)(out * INT16_MAX);
     return filter->signal;
 }
@@ -755,7 +787,9 @@ void InstrumentSequencer_NoteOff(InstrumentSequencer *pInstrumentSequencer, uint
 void InstrumentSequencer_setPosition(InstrumentSequencer *pInstrumentSequencer, uint8_t bar, uint8_t beat, uint8_t subdivision)
 {
     unsigned int index = bar * SEQUENCER_BEATS_PER_BAR * SEQUENCER_SUBDIVISIONS_PER_BEAT + beat * SEQUENCER_SUBDIVISIONS_PER_BEAT + subdivision;
-    assert(index < SEQUENCER_NUM_EVENTS);
+    // assert(index < SEQUENCER_NUM_EVENTS); // todo: this trips sometimes - why??
+    if (index >= SEQUENCER_NUM_EVENTS)
+        index = SEQUENCER_NUM_EVENTS - 1;
     SequencerEvent *pEvent = &pInstrumentSequencer->events[index];
 
     if (pEvent->command == SEQUENCERCOMMAND_WAIT)
