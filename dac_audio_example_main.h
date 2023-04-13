@@ -36,7 +36,7 @@
 static const char *TAG = "dac_audio";
 
 // #define CONFIG_EXAMPLE_AUDIO_SAMPLE_RATE = 48000
-#define WAVETABLE_SIZE 1024
+
 #define SAMPLEBUFFER_SIZE 4096
 #define SAMPLE_RATE 24000
 

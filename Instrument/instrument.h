@@ -1,7 +1,7 @@
 
+#include "wavetables.h"
+#include "../utils.h"
 #define OSCILLATORBANK_MAX_OSC 8
-#define ABS(value) (((value) >= 0) ? (value) : -(value))
-#define CLAMP(value, min, max) ((value) < (min) ? (min) : (((value) > (max)) ? (max) : (value)))
 
 typedef struct Oscillator
 {
